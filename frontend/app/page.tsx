@@ -1,5 +1,5 @@
 "use client";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 
 import Header from "./components/Header";
@@ -9,17 +9,44 @@ import SourcePanel from "./components/SourcePanel";
 import HistorySidebar from "./components/HistorySidebar";
 import TeachMePanel from "./components/TeachMePanel";
 
-import { QueryResult, ModelResponse, Chunk } from "./lib/types";
-import { MOCK_DOCUMENT } from "./lib/mockData";
-import { queryAllModelsStreaming } from "./lib/api";
+import { QueryResult, ModelResponse, Chunk, Document } from "./lib/types";
+import { queryAllModelsStreaming, getDocument } from "./lib/api";
 
 export default function Home() {
   const [activeResult, setActiveResult] = useState<QueryResult | null>(null);
   const [loadingModes, setLoadingModes] = useState<Set<string>>(new Set());
-  const [partialResults, setPartialResults] = useState<Record<string, ModelResponse>>({});
+  const [partialResults, setPartialResults] = useState<
+    Record<string, ModelResponse>
+  >({});
   const [history, setHistory] = useState<QueryResult[]>([]);
-  const [highlightedChunkId, setHighlightedChunkId] = useState<string | null>(null);
+  const [highlightedChunkId, setHighlightedChunkId] = useState<string | null>(
+    null,
+  );
   const [sourceOpen, setSourceOpen] = useState(true);
+  const [document, setDocument] = useState<Document | null>(null);
+  const [documentLoading, setDocumentLoading] = useState(true);
+  const [documentError, setDocumentError] = useState<string | null>(null);
+
+  // Fetch document on component mount
+  useEffect(() => {
+    const fetchDocument = async () => {
+      try {
+        setDocumentLoading(true);
+        setDocumentError(null);
+        const doc = await getDocument();
+        setDocument(doc);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Failed to load document";
+        setDocumentError(message);
+        console.error("Error fetching document:", error);
+      } finally {
+        setDocumentLoading(false);
+      }
+    };
+
+    fetchDocument();
+  }, []);
 
   const handleQuery = useCallback(async (query: string) => {
     setLoadingModes(new Set(["parametric", "finetuned", "rag"]));
@@ -29,25 +56,33 @@ export default function Home() {
 
     let finalResult: QueryResult | null = null;
 
-    await queryAllModelsStreaming(query, (result, completedMode) => {
-      finalResult = result;
-      const response = result.responses.find((r) => r.mode === completedMode);
-      if (response) {
-        setPartialResults((prev) => ({ ...prev, [completedMode]: response }));
-        setLoadingModes((prev) => {
-          const next = new Set(prev);
-          next.delete(completedMode);
-          return next;
+    try {
+      await queryAllModelsStreaming(query, (result, completedMode) => {
+        finalResult = result;
+        const response = result.responses.find((r) => r.mode === completedMode);
+        if (response) {
+          setPartialResults((prev) => ({ ...prev, [completedMode]: response }));
+          setLoadingModes((prev) => {
+            const next = new Set(prev);
+            next.delete(completedMode);
+            return next;
+          });
+        }
+      });
+
+      if (finalResult) {
+        setActiveResult(finalResult);
+        setHistory((prev) => {
+          const filtered = prev.filter((h) => h.query !== query);
+          return [...filtered, finalResult!];
         });
       }
-    });
-
-    if (finalResult) {
-      setActiveResult(finalResult);
-      setHistory((prev) => {
-        const filtered = prev.filter((h) => h.query !== query);
-        return [...filtered, finalResult!];
-      });
+    } catch (error) {
+      console.error("Error querying models:", error);
+      // Show error to user in UI
+      const errorMessage =
+        error instanceof Error ? error.message : "Failed to process query";
+      alert(`Error: ${errorMessage}`);
     }
   }, []);
 
@@ -68,7 +103,10 @@ export default function Home() {
       <Header />
       <QueryPanel onQuery={handleQuery} isLoading={anyLoading} />
 
-      <div className="flex-1 flex overflow-hidden" style={{ height: "calc(100vh - 120px)" }}>
+      <div
+        className="flex-1 flex overflow-hidden"
+        style={{ height: "calc(100vh - 120px)" }}
+      >
         {/* History sidebar */}
         <aside className="hidden xl:flex flex-col w-52 shrink-0 border-r border-paper-darker bg-paper-dark/30">
           <HistorySidebar
@@ -77,7 +115,9 @@ export default function Home() {
             onSelect={(r) => {
               setActiveResult(r);
               const responses: Record<string, ModelResponse> = {};
-              r.responses.forEach((resp) => { responses[resp.mode] = resp; });
+              r.responses.forEach((resp) => {
+                responses[resp.mode] = resp;
+              });
               setPartialResults(responses);
               setLoadingModes(new Set());
             }}
@@ -93,16 +133,8 @@ export default function Home() {
                 Ask anything.
               </div>
               <p className="text-sm font-mono text-ink/20 max-w-sm">
-                Type a question above or pick a preset to see how Parametric, Fine-tuned, and RAG models compare.
-              </p>
-            </div>
-          )}
-
-          {(activeResult || anyLoading) && (
-            <div className="pt-2">
-              <p className="text-[10px] font-mono text-ink/30 uppercase tracking-widest mb-1">Query</p>
-              <p className="text-base font-display font-medium text-ink/75 italic">
-                &ldquo;{activeResult?.query ?? "Thinking\u2026"}&rdquo;
+                Type a question above or pick a preset to see how Parametric,
+                Fine-tuned, and RAG models compare.
               </p>
             </div>
           )}
@@ -143,13 +175,23 @@ export default function Home() {
               <PanelRightOpen size={14} className="text-ink/30" />
             )}
           </button>
-          {sourceOpen && (
+          {sourceOpen && document && (
             <div className="flex-1 overflow-hidden">
               <SourcePanel
-                document={MOCK_DOCUMENT}
+                document={document}
                 highlightedChunkId={highlightedChunkId}
                 onClose={() => setSourceOpen(false)}
               />
+            </div>
+          )}
+          {sourceOpen && documentError && (
+            <div className="flex-1 overflow-auto p-4 text-xs text-accent">
+              <p>Error loading document: {documentError}</p>
+            </div>
+          )}
+          {sourceOpen && documentLoading && (
+            <div className="flex-1 flex items-center justify-center text-xs text-ink/30">
+              Loading document...
             </div>
           )}
         </aside>

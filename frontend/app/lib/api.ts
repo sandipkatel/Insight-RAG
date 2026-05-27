@@ -1,83 +1,72 @@
-import { QueryResult } from "./types";
-import { MOCK_RESPONSES } from "./mockData";
+import { QueryResult, PresetQuery, Document } from "./types";
 
-// This function simulates the API call with realistic staggered delays.
-// Replace this with your actual backend calls when ready.
-export async function queryAllModels(
-  query: string,
-  onProgress?: (mode: string) => void
-): Promise<QueryResult> {
-  // Normalize query for lookup
-  const key = query.trim();
-  const found = MOCK_RESPONSES[key];
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-  // Use a generic fallback if the query doesn't match a preset
-  const result: QueryResult = found ?? buildGenericFallback(query);
-
-  // Simulate staggered response times
-  const sorted = [...result.responses].sort(
-    (a, b) => (a.latencyMs ?? 1000) - (b.latencyMs ?? 1000)
-  );
-
-  // Return after simulating the slowest response
-  const maxLatency = Math.max(...sorted.map((r) => r.latencyMs ?? 1000));
-  await sleep(maxLatency);
-
-  return result;
+interface QueryRequest {
+  query: string;
 }
 
-// Simulates streaming — calls onChunk as each model "responds"
-export async function queryAllModelsStreaming(
-  query: string,
-  onModelComplete: (result: QueryResult, completedMode: string) => void
-): Promise<QueryResult> {
-  const key = query.trim();
-  const result: QueryResult = MOCK_RESPONSES[key] ?? buildGenericFallback(query);
+// Fetch the knowledge base document from backend
+export async function getDocument(): Promise<Document> {
+  const response = await fetch(`${API_BASE_URL}/api/document`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch document: ${response.statusText}`);
+  }
+  return response.json();
+}
 
-  // Simulate each model completing at its own latency
-  const promises = result.responses.map(async (response) => {
-    await sleep(response.latencyMs ?? 1000);
-    onModelComplete(result, response.mode);
-    return response;
+// Fetch preset queries from backend
+export async function getPresetQueries(): Promise<PresetQuery[]> {
+  const response = await fetch(`${API_BASE_URL}/api/preset-queries`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch preset queries: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+// Query all models via backend API
+export async function queryAllModels(query: string): Promise<QueryResult> {
+  const payload: QueryRequest = { query };
+  const response = await fetch(`${API_BASE_URL}/api/query`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
   });
 
-  await Promise.all(promises);
+  if (!response.ok) {
+    throw new Error(`Failed to query models: ${response.statusText}`);
+  }
+
+  const result = await response.json();
+  // Ensure timestamp is a Date object
+  result.timestamp = new Date(result.timestamp);
   return result;
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+// Stream responses as they complete from backend
+export async function queryAllModelsStreaming(
+  query: string,
+  onModelComplete: (result: QueryResult, completedMode: string) => void,
+): Promise<QueryResult> {
+  // For now, fetch all at once. In a real streaming scenario,
+  // you'd use Server-Sent Events (SSE) or WebSocket
+  const result = await queryAllModels(query);
 
-function buildGenericFallback(query: string): QueryResult {
-  return {
-    query,
-    timestamp: new Date(),
-    responses: [
-      {
-        mode: "parametric",
-        answer:
-          "Based on general knowledge, I can provide some information about this topic, though I may not have specifics relevant to your company's policies. Please verify with official HR documentation.",
-        hallucinations: ["I can provide some information about this topic"],
-        confidence: 30,
-        latencyMs: 800,
-      },
-      {
-        mode: "finetuned",
-        answer:
-          "This query relates to company policy. My fine-tuned knowledge suggests consulting the relevant HR policy section for accurate details.",
-        confidence: 55,
-        latencyMs: 1000,
-      },
-      {
-        mode: "rag",
-        answer:
-          "I searched the knowledge base but could not find a sufficiently relevant match for this query. The top retrieved chunks had low similarity scores. Please rephrase your question or check if relevant documentation has been indexed.",
-        citations: [],
-        retrievedChunks: [],
-        confidence: 40,
-        latencyMs: 1400,
-      },
-    ],
-  };
+  // Simulate streaming by calling onModelComplete for each response
+  // Sort by latency to maintain order
+  const sorted = [...result.responses].sort(
+    (a, b) => (a.latencyMs ?? 1000) - (b.latencyMs ?? 1000),
+  );
+
+  for (const response of sorted) {
+    // Simulate the time this model took
+    await new Promise((resolve) =>
+      setTimeout(resolve, response.latencyMs ?? 1000),
+    );
+    onModelComplete(result, response.mode);
+  }
+
+  return result;
 }
